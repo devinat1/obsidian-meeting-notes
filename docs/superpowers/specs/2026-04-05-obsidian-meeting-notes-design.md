@@ -4,244 +4,442 @@
 
 An auto-recording meeting notes system that detects meetings from Google Calendar, sends a Recall AI bot to record and transcribe them, generates summaries via LLM, and saves structured notes to Obsidian.
 
-Two components:
-1. **Backend (Go)** - Hosted by us. Owns the Recall AI integration.
-2. **Electron Tray App** - Self-hosted by user. Calendar polling, LLM summarization, Obsidian integration.
+**Two deployment targets:**
+1. **Backend microservices (Go)** - Self-hosted on homelab Kubernetes cluster (`liteagent` namespace), event-driven via Kafka
+2. **Electron Tray App** - Installed by user. Thin client: SSE for real-time events, BYOK LLM summarization, Obsidian CLI integration. No database, no calendar logic.
 
 ---
 
 ## Architecture
 
 ```
-┌───────────────────────────────────────────┐
-│         Electron Tray App (User)          │
-│                                           │
-│  ┌─────────────┐  ┌───────────────────┐  │
-│  │ Google Cal   │  │ LLM Processor     │  │
-│  │ Poller       │  │ (BYOK: Anthropic, │  │
-│  │              │  │  OpenAI, custom)   │  │
-│  └──────┬───────┘  └────────┬──────────┘  │
-│         │                   │             │
-│  ┌──────▼───────┐  ┌───────▼──────────┐  │
-│  │ Bot Dispatch  │  │ Obsidian CLI     │  │
-│  │ & Status Poll │  │ (create notes)   │  │
-│  └──────┬───────┘  └──────────────────┘  │
-│         │                                 │
-│  ┌──────▼───────┐                        │
-│  │ PostgreSQL   │                        │
-│  │ (user-hosted)│                        │
-│  └──────────────┘                        │
-└─────────┬─────────────────────────────────┘
-          │ HTTPS
-┌─────────▼─────────────────────────────────┐
-│          Backend (Go, hosted by us)        │
-│                                            │
-│  ┌──────────────┐  ┌───────────────────┐  │
-│  │ REST API     │  │ Recall AI Client  │  │
-│  │ (chi router) │  │ (bot create,      │  │
-│  │              │  │  transcript fetch) │  │
-│  └──────────────┘  └───────────────────┘  │
-│                                            │
-│  ┌──────────────┐  ┌───────────────────┐  │
-│  │ Webhook      │  │ PostgreSQL        │  │
-│  │ Handler      │  │ (our instance)    │  │
-│  └──────────────┘  └───────────────────┘  │
-└────────────────────────────────────────────┘
-          │ Webhooks
-┌─────────▼──────────┐
-│     Recall AI      │
-└────────────────────┘
+                    Tray App (user's machine)
+                    ┌──────────────────────────┐
+                    │  SSE client              │
+                    │  LLM summarizer (BYOK)   │
+                    │  Obsidian CLI            │
+                    │  Electron store (config) │
+                    └────────────┬─────────────┘
+                                 │ SSE + REST
+                                 ▼
+                    ┌──────────────────────────┐
+                    │   Gateway Service        │
+                    │   api.liteagent.net       │
+                    │   REST API + SSE push    │
+                    └────────────┬─────────────┘
+                                 │
+                    ┌────────────▼─────────────┐
+                    │   Kafka (KRaft)          │
+                    │   kafka.liteagent.svc    │
+                    │   .cluster.local:9092    │
+                    └────────────┬─────────────┘
+              ┌──────────┬───────┼───────┬──────────┐
+              ▼          ▼       ▼       ▼          ▼
+         ┌────────┐ ┌────────┐ ┌────┐ ┌──────┐ ┌──────────┐
+         │  Auth  │ │Calendar│ │Bot │ │Webhook│ │Transcript│
+         │Service │ │Service │ │Svc │ │Service│ │ Service  │
+         │        │ │        │ │    │ │       │ │          │
+         │ PG-auth│ │ PG-cal │ │PG- │ │(none) │ │PG-       │
+         │        │ │        │ │bot │ │       │ │transcript│
+         └────────┘ └────────┘ └──┬─┘ └───┬───┘ └──────────┘
+                                  │       │
+                                  ▼       ▲
+                              Recall AI ──┘
 ```
+
+---
+
+## Kafka Topics
+
+| Topic | Producer | Consumer(s) | Payload |
+|-------|----------|-------------|---------|
+| `meeting.upcoming` | Calendar Service | Bot Service, Gateway | `{user_id, calendar_event_id, meeting_url, title, start_time}` |
+| `meeting.cancelled` | Calendar Service | Bot Service | `{user_id, calendar_event_id, bot_id}` |
+| `bot.status` | Bot Service | Gateway | `{user_id, bot_id, bot_status, meeting_title}` |
+| `bot.events` | Webhook Service | Bot Service | Raw Recall webhook + `bot_id` as Kafka key |
+| `recording.events` | Webhook Service | Bot Service | Raw Recall webhook + `bot_id` as Kafka key |
+| `transcript.events` | Webhook Service | Transcript Service | Raw Recall webhook + `bot_id` as Kafka key |
+| `transcript.ready` | Transcript Service | Gateway | `{user_id, bot_id, meeting_title, raw_transcript, readable_transcript}` |
+| `transcript.failed` | Transcript Service | Gateway | `{user_id, bot_id, meeting_title, failure_sub_code}` |
+
+**Kafka key strategy:**
+- Topics produced by application services (`meeting.*`, `bot.status`, `transcript.ready/failed`) use `user_id` as Kafka key for per-user ordering
+- Topics produced by Webhook Service (`bot.events`, `recording.events`, `transcript.events`) use `bot_id` as Kafka key because Recall webhooks do not contain `user_id`. Downstream consumers (Bot Service, Transcript Service) resolve `bot_id` → `user_id` via their own database.
+
+**Consumer groups:** Each consuming service uses its own Kafka consumer group (e.g., `gateway-group`, `bot-service-group`, `transcript-service-group`). This ensures every service receives every message on topics with multiple consumers (e.g., `meeting.upcoming` goes to both Bot Service and Gateway).
 
 ---
 
 ## End-to-End Flow
 
-1. Tray app polls Google Calendar every N minutes (default: 3)
-2. Detects upcoming meetings with video conference links (Zoom, Meet, Teams)
-3. When a meeting is within `bot_join_before_minutes` (default: 1) of starting, calls `POST /api/bots` on the backend
-4. Backend creates Recall bot with transcript config, returns `bot_id`
-5. Recall bot joins the meeting, records, and transcribes
-6. Recall sends webhooks to backend (bot.*, recording.done/failed, transcript.done/failed)
-7. Backend updates state in its Postgres
-8. Tray app polls `GET /api/bots/:botId/status` every 30 seconds while a bot is active (stops on terminal status)
-9. When transcript is done, tray app fetches it via `GET /api/bots/:botId/transcript`
-10. Tray app sends transcript to LLM (user's own key) for summary + action items
-11. Tray app creates structured markdown note via `obsidian create`
-
-**Terminal statuses (stop polling when transcript OR bot reaches a final state):**
-- `transcript.done` - success, proceed to fetch and process
-- `transcript.failed` - transcript generation failed, show error
-- `bot.fatal` - bot crashed, no transcript expected
-- `recording.failed` - no recording, no transcript expected
-
-Note: `bot.done` is NOT terminal for polling purposes. The bot can finish before the transcript is ready. Keep polling until one of the above statuses is reached.
+1. User connects Google Calendar via OAuth (Gateway → Calendar Service stores tokens)
+2. Calendar Service polls Google Calendar every 3 minutes per user
+3. Calendar Service detects meeting with video link approaching start time → publishes `meeting.upcoming` to Kafka
+4. Bot Service consumes `meeting.upcoming` → creates Recall bot → publishes `bot.status` (scheduled)
+5. Recall bot joins meeting, records, transcribes
+6. Recall sends webhooks to Webhook Service → publishes raw events to `bot.events`, `recording.events`, `transcript.events`
+7. Bot Service consumes `bot.events` + `recording.events` → updates state → publishes `bot.status` changes
+8. Transcript Service consumes `transcript.events` → on `transcript.done`, fetches transcript from Recall → publishes `transcript.ready`
+9. Gateway consumes `bot.status` + `transcript.ready` → pushes via SSE to connected tray app
+10. Tray app receives `transcript.ready` SSE event → runs LLM summarization locally → creates Obsidian note
 
 ---
 
-## Component 1: Backend (Go)
+## Infrastructure (Homelab Kubernetes)
 
-### Stack
-- Go with chi router
-- PostgreSQL (our hosted instance)
-- Recall AI via HTTP client
+All microservices deploy to the `liteagent` namespace following the existing Helm chart pattern.
+
+**Existing infrastructure used:**
+- Kafka: `kafka.liteagent.svc.cluster.local:9092` (KRaft, single broker)
+- NGINX Ingress + MetalLB (IP pool `192.168.4.120-192.168.4.130`)
+- cert-manager with `letsencrypt-prod` for TLS
+- `local-path` StorageClass for PVCs
+- OTel → Prometheus/Loki/Tempo → Grafana for observability
+
+**New infrastructure:**
+- 4 new Postgres instances (auth, calendar, bot, transcript) - each a small Helm chart with `postgres:16`, `local-path` PVC
+- 6 new Go service Helm charts
+- 1 new Ingress: `api.liteagent.net` → Gateway Service
+
+**Each Helm chart follows the homelab pattern:**
+```
+helm-meeting-<service>/
+├── Chart.yaml
+├── values.yaml
+└── templates/
+    ├── deployment.yaml    # Recreate strategy, single replica
+    ├── service.yaml       # ClusterIP
+    ├── secret.yaml        # Env vars, credentials
+    ├── pvc.yaml           # If has Postgres
+    └── ingress.yaml       # Only for Gateway
+```
+
+---
+
+## Microservice 1: Gateway Service
+
+### Responsibility
+REST API for the tray app. SSE push for real-time events. Routes commands to services via Kafka. Authenticates all requests by calling Auth Service.
 
 ### API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST /api/auth/register` | Register new user, send verification email |
-| `GET /api/auth/verify` | Email verification callback, returns API key |
-| `POST /api/auth/rotate-key` | Rotate API key (requires current key) |
-| `POST /api/bots` | Create Recall bot for a meeting URL |
-| `GET /api/bots/:botId/status` | Bot/recording/transcript status |
-| `GET /api/bots/:botId/transcript` | Fetch completed transcript (both raw + readable) |
-| `DELETE /api/bots/:botId` | Remove bot from meeting (calls Recall to leave) |
-| `POST /api/webhooks/recallai` | Receive Recall webhooks |
+| `POST /api/auth/register` | Proxy to Auth Service |
+| `GET /api/auth/verify` | Proxy to Auth Service |
+| `POST /api/auth/rotate-key` | Proxy to Auth Service |
+| `GET /api/auth/calendar/connect` | Initiate Google OAuth flow (redirects to Calendar Service) |
+| `GET /api/auth/calendar/callback` | OAuth callback (Calendar Service stores token) |
+| `GET /api/events/stream` | SSE stream for authenticated user |
+| `GET /api/meetings` | List user's upcoming meetings (from Calendar Service) |
+| `GET /api/bots/:botId/transcript` | Fetch transcript (from Transcript Service) |
+| `DELETE /api/bots/:botId` | Cancel bot (publishes command to Bot Service) |
+| `POST /api/webhooks/recallai` | Proxy to Webhook Service (no auth required) |
+
+### SSE Stream (`GET /api/events/stream`)
+- Requires `Authorization: Bearer <key>` (via query param `?token=` for SSE compatibility)
+- Pushes events to connected tray app:
+  - `event: bot.status` → `{bot_id, bot_status, meeting_title}`
+  - `event: transcript.ready` → `{bot_id, meeting_title, raw_transcript, readable_transcript}`
+  - `event: transcript.failed` → `{bot_id, meeting_title, failure_sub_code}`
+  - `event: meeting.upcoming` → `{calendar_event_id, title, start_time, meeting_url}`
+- Each SSE event includes an `id` field (monotonically increasing per user, stored in Gateway memory)
+- Gateway buffers the last 100 events per user in memory
+- Heartbeat: sends `event: ping` every 30 seconds to keep connection alive
+- On disconnect: tray app reconnects with `Last-Event-ID` header. Gateway replays any buffered events with ID > `Last-Event-ID` before resuming live stream. If `Last-Event-ID` is older than the buffer, Gateway sends all buffered events (best-effort catch-up).
+
+### Kafka
+- **Produces:** nothing directly (routes HTTP requests to services via internal HTTP or Kafka commands)
+- **Consumes:** `bot.status`, `transcript.ready`, `transcript.failed`, `meeting.upcoming` — filters by `user_id`, pushes to matching SSE connection
 
 ### Rate Limiting
-- `POST /api/auth/register`: 5 requests per hour per IP
-- `POST /api/bots`: 20 requests per hour per user
-- `GET /api/bots/*`: 120 requests per minute per user (to support 30s polling of multiple bots)
-- Rate limiting via in-memory token bucket, keyed on IP for unauthenticated routes and user ID for authenticated routes
+- `POST /api/auth/register`: 5 per hour per IP
+- `GET /api/events/stream`: 1 concurrent connection per user
+- All other endpoints: 60 per minute per user
+- In-memory token bucket
 
-### Auth
+### No database
+Gateway is stateless. Holds SSE connections in memory (map of user_id → SSE writer).
 
-**Registration (`POST /api/auth/register`):**
-- Input: `{ "email": "user@example.com" }`
-- Generates a random verification token, stores its SHA-256 hash in a `verification_tokens` table with 24-hour expiry
-- Sends email with link: `GET /api/auth/verify?token=<token>`
-- Unverified users are cleaned up after 7 days by a background goroutine
+---
 
-**Email verification (`GET /api/auth/verify?token=<token>`):**
-- Hashes the token with SHA-256, looks up in `verification_tokens`
-- If valid and not expired: generates a random 256-bit API key
-- Stores SHA-256 hash of the API key in the `users` table (SHA-256 is appropriate for high-entropy random keys; bcrypt is unnecessary here)
-- Redirects to a static HTML page that displays the API key client-side via URL fragment (`#key=...`), so the key never appears in server logs or proxy caches
-- User must copy and store the key; it cannot be retrieved again
+## Microservice 2: Auth Service
 
-**Key rotation (`POST /api/auth/rotate-key`):**
-- Requires current valid API key in `Authorization: Bearer <key>`
-- Generates new key, stores SHA-256 hash, invalidates old key
-- Returns new key in response body
+### Responsibility
+User registration, email verification, API key management.
 
-**Request auth:**
-- All endpoints (except register, verify, and webhooks) require `Authorization: Bearer <key>`
-- Backend computes SHA-256 of the provided key and looks up the user by hash (constant-time indexed lookup)
-- All bot endpoints verify the authenticated user owns the requested bot (user_id FK check). Returns 404 if not owned.
+### Internal API (called by Gateway via HTTP)
 
-### Database (Backend Postgres)
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST /internal/auth/register` | Register user, send verification email |
+| `GET /internal/auth/verify` | Verify email token, return API key |
+| `POST /internal/auth/rotate-key` | Rotate API key |
+| `GET /internal/auth/validate` | Validate API key, return user_id (called on every Gateway request) |
+
+### Database (PG-auth)
 
 **`users` table:**
 - `id` (serial, primary key)
 - `email` (text, unique)
-- `api_key_hash` (text, unique, indexed) - SHA-256 hex of API key
+- `api_key_hash` (text, unique, indexed) - SHA-256 hex
 - `verified` (boolean, default false)
 - `created_at` (timestamptz)
 - `updated_at` (timestamptz)
 
 **`verification_tokens` table:**
 - `id` (serial, primary key)
-- `user_id` (integer, FK to users)
+- `user_id` (integer, FK to users, ON DELETE CASCADE)
 - `token_hash` (text, unique) - SHA-256 hex
 - `expires_at` (timestamptz)
 - `created_at` (timestamptz)
 
-**`bots` table:**
-- `id` (serial, primary key)
-- `user_id` (integer, FK to users)
-- `bot_id` (text, unique - Recall bot ID)
-- `meeting_url` (text)
-- `bot_status` (text, default 'scheduled')
-- `bot_webhook_updated_at` (timestamptz, nullable) - last Recall webhook timestamp for bot events
-- `recording_id` (text, nullable)
-- `recording_status` (text, nullable)
-- `recording_webhook_updated_at` (timestamptz, nullable) - last Recall webhook timestamp for recording events
-- `transcript_id` (text, nullable)
-- `transcript_status` (text, nullable)
-- `transcript_failure_sub_code` (text, nullable)
-- `transcript_webhook_updated_at` (timestamptz, nullable) - last Recall webhook timestamp for transcript events
-- `created_at` (timestamptz)
-- `updated_at` (timestamptz)
+### Email Sending
+- Uses SMTP via env vars: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`
+- Go `net/smtp` for sending (no external dependency). Sends plain-text verification emails.
+- For production, any SMTP-compatible service works (Gmail SMTP, SendGrid, AWS SES, self-hosted Postfix)
 
-### Recall Integration
-
-**Bot creation (`POST /api/bots`):**
-- Input: `{ "meeting_url": "https://..." }`
-- POST to `https://{RECALL_REGION}.recall.ai/api/v1/bot/`
-- Includes transcript config: `recallai_streaming`, `prioritize_accuracy`, `auto` language, diarization enabled
-- Retries on 507: every 30s, up to 10 attempts
-- Respects 429 `Retry-After` header with small jitter
-- On 400 (bad URL), 401 (auth), 500 (server error): returns the error directly to the tray app with appropriate HTTP status. No retry.
-- On success: persists bot record with `bot_status='scheduled'`, returns `{ "bot_id": "..." }`
-
-**Bot lifecycle:**
-- Recall bots automatically leave when the meeting ends (host ends call or all participants leave)
-- `DELETE /api/bots/:botId` allows early removal: backend calls Recall's delete bot endpoint to force the bot to leave
-- Stale bot cleanup: a background goroutine runs every 15 minutes, marks bots stuck in non-terminal states for >3 hours as `bot.fatal` with sub_code `stale_timeout`
-
-**Webhook handler (`POST /api/webhooks/recallai`):**
-- Reads raw request body
-- Verifies Recall HMAC-SHA256 signature: the `webhook-secret` from the Recall dashboard is used to compute HMAC-SHA256 over the raw request body. The computed signature is compared against the signature in the request headers (per Recall's Svix webhook format). See: https://docs.recall.ai/docs/authenticating-requests-from-recallai
-- `RECALL_WORKSPACE_VERIFICATION_SECRET` is configured as a backend env var
-- Returns 401 on signature verification failure
-- The webhook URL is configured once globally in the Recall dashboard, not per-bot
-- Updates only related fields per event type, using per-event-type timestamp columns:
-  - `bot.*` → compare `data.data.updated_at` against `bot_webhook_updated_at`; skip if stored is newer; otherwise update `bot_status` and `bot_webhook_updated_at`
-  - `recording.done/failed` → compare against `recording_webhook_updated_at`; update `recording_id`, `recording_status`, `recording_webhook_updated_at`
-  - `transcript.done/failed` → compare against `transcript_webhook_updated_at`; update `transcript_id`, `transcript_status`, `transcript_failure_sub_code`, `transcript_webhook_updated_at`
-- Also sets `updated_at` on the row for general bookkeeping
-- Returns 200 immediately, does not block on downstream work
-- Per-event-type timestamps ensure that stale cleanup or other operations on the shared `updated_at` column do not interfere with webhook idempotency
-
-**Transcript retrieval (`GET /api/bots/:botId/transcript`):**
-- Check stored `transcript_status`
-- If pending/null: return `{"status": "pending"}`
-- If failed: return `{"status": "failed", "sub_code": "..."}`
-- If done: fetch transcript via Recall API (`GET /api/v1/transcript/{transcript_id}`), download from `data.download_url`, convert to readable format, return both raw + readable
-
-**Status endpoint (`GET /api/bots/:botId/status`) response schema:**
-```json
-{
-  "bot_id": "string",
-  "bot_status": "string",
-  "recording_status": "string | null",
-  "transcript_status": "string | null",
-  "transcript_failure_sub_code": "string | null",
-  "updated_at": "ISO8601 string"
-}
-```
+### Auth Flow
+- Registration: `POST {email}` → generate verification token → store SHA-256 hash with 24h expiry → send email via SMTP with `GET /api/auth/verify?token=<raw>`
+- Verification: hash token → lookup → generate 256-bit API key → store SHA-256 of key → redirect to static page showing key via URL fragment (`#key=...`)
+- Key rotation: validate current key → generate new → hash and store → return new key
+- Validation: Gateway calls `GET /internal/auth/validate` with `Authorization` header on every request → returns `{user_id}` or 401
+- Background: goroutine cleans unverified users older than 7 days
 
 ---
 
-## Component 2: Electron Tray App
+## Microservice 3: Calendar Service
+
+### Responsibility
+Stores user Google OAuth tokens. Polls Google Calendar per user. Publishes `meeting.upcoming` and `meeting.cancelled` events.
+
+### Internal API (called by Gateway)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET /internal/calendar/auth-url` | Generate Google OAuth URL for user |
+| `POST /internal/calendar/callback` | Exchange OAuth code for tokens, store |
+| `DELETE /internal/calendar/disconnect` | Remove stored tokens for user |
+| `GET /internal/calendar/meetings` | List upcoming meetings for user |
+| `GET /internal/calendar/status` | Whether user has connected calendar |
+
+### Database (PG-cal)
+
+**`calendar_connections` table:**
+- `id` (serial, primary key)
+- `user_id` (integer, unique)
+- `refresh_token` (text, encrypted at app level via AES-256-GCM with key from env var)
+- `poll_interval_minutes` (integer, default 3)
+- `bot_join_before_minutes` (integer, default 1)
+- `created_at` (timestamptz)
+- `updated_at` (timestamptz)
+
+**`tracked_meetings` table:**
+- `id` (serial, primary key)
+- `user_id` (integer)
+- `calendar_event_id` (text)
+- `title` (text)
+- `start_time` (timestamptz)
+- `end_time` (timestamptz)
+- `meeting_url` (text)
+- `attendees` (jsonb)
+- `bot_dispatched` (boolean, default false)
+- `cancelled` (boolean, default false)
+- `created_at` (timestamptz)
+- `updated_at` (timestamptz)
+- UNIQUE constraint on (`user_id`, `calendar_event_id`)
+
+### Polling Logic
+- Background goroutine manages a polling loop per connected user
+- Every `poll_interval_minutes`: fetch Google Calendar events for next 2 hours
+- For each event with a video link (Meet, Zoom, Teams):
+  - Upsert into `tracked_meetings` (update title/time/url/attendees if changed)
+  - If within `bot_join_before_minutes` of start AND `bot_dispatched = false` → publish `meeting.upcoming` to Kafka, set `bot_dispatched = true`
+- For events deleted from calendar since last poll: if `bot_dispatched = true` → publish `meeting.cancelled` to Kafka, set `cancelled = true`
+
+### Google OAuth
+- OAuth client ID + secret stored as env vars (bundled credentials for `calendar.readonly` scope)
+- Redirect URI: `https://api.liteagent.net/api/auth/calendar/callback`
+- Gateway proxies the OAuth flow; Calendar Service handles token exchange and storage
+
+### URL Extraction
+- Google Meet: `conferenceData.entryPoints[].uri`
+- Zoom/Teams: regex on event description/location (`zoom.us/j/`, `teams.microsoft.com/l/meetup-join/`)
+
+---
+
+## Microservice 4: Bot Service
+
+### Responsibility
+Creates and manages Recall AI bots. Tracks bot lifecycle state.
+
+### Kafka
+- **Consumes:** `meeting.upcoming`, `meeting.cancelled`, `bot.events`, `recording.events`
+- **Produces:** `bot.status`
+
+### Internal API (called by Gateway)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `DELETE /internal/bots/:botId` | Force-remove bot from meeting |
+| `GET /internal/bots/:botId/status` | Get current bot state (returns `{user_id, bot_id, bot_status, meeting_title, meeting_url}`) |
+
+### Database (PG-bot)
+
+**`bots` table:**
+- `id` (serial, primary key)
+- `user_id` (integer)
+- `bot_id` (text, unique - Recall bot ID)
+- `calendar_event_id` (text)
+- `meeting_url` (text)
+- `meeting_title` (text)
+- `bot_status` (text, default 'scheduled')
+- `bot_webhook_updated_at` (timestamptz, nullable)
+- `recording_id` (text, nullable)
+- `recording_status` (text, nullable)
+- `recording_webhook_updated_at` (timestamptz, nullable)
+- `created_at` (timestamptz)
+- `updated_at` (timestamptz)
+
+### Event Handling
+
+**On `meeting.upcoming`:**
+- Create Recall bot via HTTP: `POST https://{RECALL_REGION}.recall.ai/api/v1/bot/`
+- Transcript config: `recallai_streaming`, `prioritize_accuracy`, `auto` language, diarization enabled
+- Retries on 507: every 30s, up to 10 attempts
+- Respects 429 `Retry-After` with jitter
+- On success: insert bot record, publish `bot.status` (scheduled)
+
+**On `meeting.cancelled`:**
+- Look up bot by `calendar_event_id` + `user_id`
+- If bot exists and not in terminal state: call Recall delete bot API
+- Publish `bot.status` (cancelled)
+
+**On `bot.events`:**
+- Compare `data.data.updated_at` against `bot_webhook_updated_at`; skip if stale
+- Update `bot_status`
+- Publish `bot.status` to Kafka (for Gateway SSE push)
+
+**On `recording.events`:**
+- Compare against `recording_webhook_updated_at`; skip if stale
+- Update `recording_id`, `recording_status`
+
+**Stale bot cleanup:** goroutine every 15 min marks bots stuck >3 hours in non-terminal states as `bot.fatal`
+
+---
+
+## Microservice 5: Webhook Service
+
+### Responsibility
+Receives Recall AI webhooks. Verifies HMAC signature. Publishes raw events to Kafka. Stateless.
+
+### HTTP Endpoint
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST /webhooks/recallai` | Receive Recall webhooks |
+
+Exposed internally via ClusterIP service. The Recall dashboard webhook URL points to the Gateway's public endpoint (`https://api.liteagent.net/api/webhooks/recallai`), which the Gateway proxies to the Webhook Service.
+
+### Webhook Processing
+1. Read raw request body
+2. Verify HMAC-SHA256 signature using `RECALL_WORKSPACE_VERIFICATION_SECRET` (env var). Signature is in Svix webhook format. Return 401 on failure.
+3. Parse event type from payload
+4. Publish to appropriate Kafka topic:
+   - `bot.*` events → `bot.events`
+   - `recording.*` events → `recording.events`
+   - `transcript.*` events → `transcript.events`
+5. Return 200 immediately
+
+### No database
+Completely stateless. Just a webhook-to-Kafka bridge.
+
+---
+
+## Microservice 6: Transcript Service
+
+### Responsibility
+Consumes transcript completion events. Fetches full transcript from Recall. Converts to readable format. Publishes result.
+
+### Kafka
+- **Consumes:** `transcript.events`
+- **Produces:** `transcript.ready`, `transcript.failed`
+
+### Database (PG-transcript)
+
+**`transcripts` table:**
+- `id` (serial, primary key)
+- `bot_id` (text, unique)
+- `user_id` (integer)
+- `meeting_title` (text)
+- `transcript_id` (text - Recall transcript ID)
+- `status` (text) - `done` or `failed`
+- `failure_sub_code` (text, nullable)
+- `raw_transcript` (jsonb, nullable)
+- `readable_transcript` (jsonb, nullable)
+- `created_at` (timestamptz)
+
+### Internal API (called by Gateway)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET /internal/transcripts/:botId` | Get stored transcript for a bot |
+
+### Event Handling
+
+**On `transcript.done` event:**
+1. Extract `bot_id` and `transcript_id` from Recall webhook payload (Kafka key is `bot_id`)
+2. Call Bot Service internal API: `GET /internal/bots/{bot_id}/status` to resolve `user_id` and `meeting_title`
+3. Fetch transcript metadata from Recall: `GET /api/v1/transcript/{transcript_id}`
+4. Download transcript from `data.download_url`
+5. Convert raw transcript to readable format (speaker + paragraph + timestamps)
+6. Store `bot_id`, `user_id`, `meeting_title`, and both transcript formats in `transcripts` table
+7. Publish `transcript.ready` to Kafka (key: `user_id`) with `{user_id, bot_id, meeting_title, raw_transcript, readable_transcript}`
+
+**On `transcript.failed` event:**
+1. Extract `bot_id` from payload, resolve `user_id` and `meeting_title` via Bot Service
+2. Store failure in `transcripts` table
+3. Publish `transcript.failed` to Kafka (key: `user_id`) with `{user_id, bot_id, meeting_title, failure_sub_code}`
+
+### Readable Transcript Conversion
+Each raw entry has `words[]` and `participant`. Conversion joins words into paragraphs grouped by speaker, preserving timestamps.
+
+---
+
+## Electron Tray App (Thin Client)
 
 ### Stack
 - Electron (tray icon only, no main window)
 - TypeScript
 - Vercel AI SDK (multi-provider LLM)
-- PostgreSQL (user-hosted). Postgres is used because the user explicitly requires self-hosting with a real database. Users can use Docker (`docker run postgres`), a managed instance (Supabase, Neon, RDS), or a local install.
-- Google Calendar API
 - Obsidian CLI
+- Electron Store (local config, encrypted)
+- EventSource (SSE client)
 
-### Schema Migrations
-- On startup, the tray app runs auto-migrations against the user's Postgres using a migrations table (`_migrations`) to track applied versions
-- Migrations are bundled with the app and applied sequentially
-- This ensures schema changes in future releases are applied automatically
+### No database
+All state comes from the backend via SSE. Local config stored in Electron Store (JSON file encrypted via safeStorage).
+
+### SSE Connection
+- On startup, connects to `GET /api/events/stream?token=<api_key>`
+- Handles events:
+  - `meeting.upcoming` → update tray menu with upcoming meetings
+  - `bot.status` → update tray icon state (joining → recording → done)
+  - `transcript.ready` → enqueue for LLM processing
+  - `transcript.failed` → show error notification
+  - `ping` → keepalive (no action)
+- On disconnect: reconnect with exponential backoff (1s, 2s, 4s, 8s, max 30s)
 
 ### Tray Icon States
-- Grey: idle, no meetings soon
-- Yellow: meeting detected, bot joining
+- Grey: idle / connected
+- Yellow: bot joining a meeting
 - Red: bot recording
-- Blue: processing transcript/summary
-- Red with exclamation overlay: error state (displayed when any step in the pipeline fails)
-
-**Error badge behavior:** Shown when bot dispatch fails, LLM summarization fails, or Obsidian note creation fails. Clicking the tray icon shows the error in the menu status line. Clears automatically when the next operation succeeds, or user can dismiss via "Clear Error" menu item.
+- Blue: processing transcript / LLM summarization
+- Red with exclamation: error (SSE disconnected, LLM failed, Obsidian unavailable)
 
 ### Tray Menu
-- Status line: "Next meeting: Standup in 12 min" or "Recording: Design Review" or "Error: LLM request failed"
-- "Upcoming Meetings" submenu
-- "Recent Notes" submenu (each note shows title; click opens in Obsidian via `obsidian open`; right-click shows "Re-summarize" option for notes with failed/missing summaries)
+- Status line: "Connected" / "Recording: Design Review" / "Error: ..."
+- "Upcoming Meetings" submenu (populated from SSE `meeting.upcoming` events)
+- "Recent Notes" submenu (click opens in Obsidian; right-click "Re-summarize" for failed summaries)
 - "Clear Error" (shown only in error state)
 - "Settings..."
 - "Quit"
@@ -250,76 +448,26 @@ Note: `bot.done` is NOT terminal for polling purposes. The bot can finish before
 - "Bot joined: Design Review"
 - "Transcript ready, generating summary..."
 - "Meeting note saved: Design Review" (click opens in Obsidian)
-- "Error: Failed to dispatch bot for Design Review" (on failure)
+- "Error: ..." (on failures)
 
 ### Settings Panel (small window)
-- Database URL (Postgres connection string)
-- Google Calendar: Connect/Disconnect (OAuth flow)
-- Google OAuth Client ID + Secret (optional, for BYOK OAuth credentials)
+- Backend API Key
+- Google Calendar: Connect/Disconnect (opens browser to `https://api.liteagent.net/api/auth/calendar/connect`)
 - LLM Provider: Anthropic / OpenAI / OpenAI-compatible
 - LLM API Key
 - LLM Base URL (for OpenAI-compatible only)
 - LLM Model (optional override)
-- Backend API Key (the key issued by our backend)
 - Obsidian vault (auto-detect active, or override)
-- Bot join timing (minutes before meeting start)
-- Calendar poll interval (minutes)
 
-### Database (User Postgres)
-
-**`meetings` table:**
-- `id` (serial, primary key)
-- `calendar_event_id` (text, unique)
-- `title` (text)
-- `start_time` (timestamptz)
-- `end_time` (timestamptz)
-- `meeting_url` (text)
-- `attendees` (jsonb)
-- `status` (text, default 'upcoming') - one of: `upcoming`, `bot_dispatched`, `recording`, `processing`, `completed`, `failed`, `cancelled`
-- `bot_id` (text, nullable - from backend)
-- `bot_status` (text, nullable)
-- `recording_status` (text, nullable)
-- `transcript_status` (text, nullable)
-- `obsidian_note_path` (text, nullable)
-- `raw_transcript` (jsonb, nullable) - cached locally for re-summarize functionality
-- `created_at` (timestamptz, default now())
-- `updated_at` (timestamptz, default now())
-
-**`config` table:**
-- `key` (text, primary key)
-- `value` (text, encrypted at app level via Electron safeStorage for secrets)
-
-Config keys: `backend_api_key`, `google_calendar_refresh_token`, `google_oauth_client_id`, `google_oauth_client_secret`, `llm_provider`, `llm_api_key`, `llm_base_url`, `llm_model`, `calendar_poll_interval_minutes`, `bot_join_before_minutes`, `obsidian_vault`
-
-**Note on safeStorage:** Electron's `safeStorage` is tied to the OS keychain and the specific app installation. If the user reinstalls the app or migrates the database to a different machine, encrypted config values become undecryptable. The app detects this on startup and prompts the user to re-enter credentials via the setup wizard.
-
-### Google Calendar Integration
-
-**OAuth setup:**
-- We ship a Google Cloud OAuth client ID + secret bundled in the app (for Google Calendar readonly access). For desktop/installed apps, the client secret is not truly secret (Google documents this), but we bundle it for convenience.
-- User can optionally provide their own OAuth client ID + secret in settings (for self-hosted scenarios where our client ID has quota limits)
-- `calendar.readonly` scope only
-- Redirect URI: `http://localhost:{random_port}/oauth/callback` - Electron spins up a temporary local HTTP server to receive the OAuth callback
-- Stores refresh token in config (encrypted via safeStorage)
-- On token refresh failure (expired/revoked): clears stored token, shows notification prompting user to reconnect, sets tray to error state
-
-**Polling:**
-- Every N minutes (configurable, default: 3), fetch events for next 2 hours via Google Calendar API
-- Filter for events with video conference links
-- For already-tracked events (matched by `calendar_event_id`): update `title`, `start_time`, `end_time`, `meeting_url`, `attendees` if changed
-- For new events: insert into meetings table with status `upcoming`
-- For events deleted from calendar since last poll: if `bot_id` is set and bot is not in a terminal state, call `DELETE /api/bots/:botId` on backend. Set meeting `status` to `cancelled`.
-- When meeting is within `bot_join_before_minutes` of starting AND `bot_id` is null AND `status` is `upcoming`, dispatch bot via backend
-- Overlapping meetings: dispatch bots to all meetings that qualify. No limit on concurrent bots.
-
-**Bot dispatch deduplication:**
-- Before calling `POST /api/bots`, check the local `meetings` table: if `bot_id` is already set for this `calendar_event_id`, skip dispatch
-- After successful dispatch, immediately store the returned `bot_id` and set `status` to `bot_dispatched`
-- This prevents duplicate dispatches across polling cycles
-
-**URL extraction:**
-- Google Meet: `conferenceData.entryPoints[].uri`
-- Zoom/Teams: regex on event description/location for known URL patterns (`zoom.us/j/`, `teams.microsoft.com/l/meetup-join/`)
+### Local Config (Electron Store)
+Keys stored locally, secrets encrypted via safeStorage:
+- `backend_api_key`
+- `llm_provider`
+- `llm_api_key`
+- `llm_base_url`
+- `llm_model`
+- `obsidian_vault`
+- `recent_notes` (array of `{title, path, date}` for tray menu, max 20)
 
 ### LLM Integration (BYOK)
 
@@ -328,37 +476,21 @@ Config keys: `backend_api_key`, `google_calendar_refresh_token`, `google_oauth_c
 - OpenAI (GPT-4)
 - OpenAI-compatible (Ollama, local models, etc.)
 
-**Config:**
-- `llm_provider`: anthropic | openai | openai_compatible
-- `llm_api_key`: user's key
-- `llm_base_url`: for OpenAI-compatible endpoints
-- `llm_model`: optional override
-
 **Prompt:** Given the readable transcript, generate:
 - 2-3 paragraph summary
 - Action items with assignees
 - Key decisions made
 
 **Long transcript handling:**
-- If the readable transcript exceeds 100,000 characters (~25K tokens), chunk it into overlapping segments of 80,000 characters with 5,000 character overlap
-- Summarize each chunk independently
-- Then send all chunk summaries to the LLM in a final pass to produce the consolidated summary, action items, and key decisions
-- If a single chunk still fails (context window exceeded), halve the chunk size and retry
+- If transcript exceeds 100,000 characters, chunk into 80,000-char segments with 5,000-char overlap
+- Summarize each chunk, then consolidate in a final LLM pass
+- If chunk still exceeds context window, halve chunk size and retry
 
 ### Obsidian Integration
 
-**Note creation:** The Obsidian CLI `create` command accepts `name`, `path`, and `content` parameters (verified from `obsidian help create`). For long transcripts that may exceed OS argument length limits (~256KB on macOS), write the note content to a temp file and use `content="$(cat /tmp/meeting-note-XXXX.md)"`. Delete the temp file after successful creation.
+**Note creation:** Write content to temp file, then `obsidian create path="Meetings/YYYY-MM-DD Title.md" content="$(cat /tmp/meeting-note-XXXX.md)"`. If `obsidian_vault` config is set, pass `vault=<name>`.
 
-The Obsidian CLI is a first-party tool (https://obsidian.md/cli). It requires:
-- Obsidian desktop app to be running
-- CLI activated in Settings > General
-- CLI registered in system PATH
-
-The tray app verifies CLI availability at startup by running `obsidian version`. If unavailable, shows a setup prompt in the settings panel.
-
-If the `obsidian_vault` config key is set, pass `vault=<name>` to all Obsidian CLI commands.
-
-**Note naming:** `YYYY-MM-DD Meeting Title.md`. If a file with the same name already exists (e.g., recurring meetings), append a sequence number: `YYYY-MM-DD Meeting Title (2).md`. Check existence via `obsidian file path="Meetings/..."` before creating.
+**Note naming:** `YYYY-MM-DD Meeting Title.md`. If exists, append sequence number: `(2)`, `(3)`, etc.
 
 **Note format:**
 ```markdown
@@ -396,42 +528,18 @@ Hello everyone, let's get started.
 Thanks Alice. I wanted to discuss the API changes...
 ```
 
-**Folder:** `Meetings/` in the active Obsidian vault (or configured vault)
+### Processing Pipeline
+Sequential queue (FIFO). When `transcript.ready` arrives via SSE:
+1. Add to queue
+2. Process one at a time: LLM summarize → create Obsidian note → add to `recent_notes`
 
-### Processing Pipeline & Concurrency
+**LLM failure:** retry once after 5s. If still failing, save transcript-only note, show notification. User can re-summarize from tray menu (transcript cached in Electron Store temporarily).
 
-When a bot reaches `transcript.done`, the tray app adds it to a sequential processing queue. Items are processed one at a time in FIFO order:
-1. Fetch transcript from backend, cache `raw_transcript` locally in the meetings row
-2. Send to LLM for summarization
-3. Create Obsidian note
-4. Set meeting `status` to `completed`
+**Obsidian CLI failure:** queue note content in `pending_notes` dir in app userData. Retry periodically. Show notification.
 
-This prevents parallel LLM requests from hitting rate limits and avoids concurrent Obsidian CLI calls. If multiple meetings end near-simultaneously, they are queued and processed in order.
-
-### Error Handling & Retries
-
-**Bot dispatch failure (backend unreachable or returns error):**
-- If backend is unreachable: retry 3 times with exponential backoff (2s, 4s, 8s)
-- If backend returns 4xx (bad URL, auth failure): do not retry, show error notification with the backend's error message. Set meeting `status` to `failed`.
-- If backend returns 5xx: retry up to 3 times with exponential backoff
-- If all retries fail, set tray to error state, show notification, set meeting `status` to `failed`
-- On next poll cycle, re-attempt if meeting is still upcoming and `status` is `failed` (reset to `upcoming`)
-
-**LLM summarization failure:**
-- Retry once after 5 seconds
-- If still failing, save the note without the summary sections (transcript only) and show a notification: "Summary generation failed. Transcript saved."
-- User can re-trigger summarization from the "Recent Notes" right-click menu. This uses the locally cached `raw_transcript`, so it works even if the backend has purged its records.
-
-**Obsidian CLI failure:**
-- If `obsidian create` fails (app not running, vault not found), queue the note content in a local `pending_notes` directory within the Electron app's userData path
-- Retry on next poll cycle (check every poll interval whether Obsidian is available)
-- Show notification: "Obsidian not available. Note queued."
-- Queued notes are written once Obsidian becomes available
-
-### First-Run Setup Wizard
-1. PostgreSQL connection string (with "Test Connection" button). Auto-runs initial migration on success.
-2. Backend API key (with "Verify" button that calls `GET /api/bots` to confirm auth)
-3. Connect Google Calendar (OAuth flow in browser)
-4. Choose LLM provider + enter API key (with "Test" button that sends a short prompt)
-5. Verify Obsidian CLI is available (auto-detected, with troubleshooting link if missing)
-6. Done - app starts polling
+### First-Run Setup
+1. Enter backend API key (with "Verify" button)
+2. Connect Google Calendar (opens browser)
+3. Enter LLM API key + choose provider
+4. Verify Obsidian CLI available
+5. Done - SSE connects, app starts receiving events
