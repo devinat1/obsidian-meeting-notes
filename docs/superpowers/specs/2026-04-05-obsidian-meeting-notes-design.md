@@ -428,12 +428,6 @@ This prevents parallel LLM requests from hitting rate limits and avoids concurre
 - Show notification: "Obsidian not available. Note queued."
 - Queued notes are written once Obsidian becomes available
 
-### Data Retention
-
-- Meetings older than 90 days are automatically deleted from the user's Postgres (the locally cached `raw_transcript` is included in the deletion)
-- The Obsidian notes themselves persist in the vault (not managed by the tray app)
-- Backend retains bot records for 30 days, then hard deletes
-
 ### First-Run Setup Wizard
 1. PostgreSQL connection string (with "Test Connection" button). Auto-runs initial migration on success.
 2. Backend API key (with "Verify" button that calls `GET /api/bots` to confirm auth)

@@ -440,11 +440,6 @@ export async function cancelMeeting(calendarEventId: string): Promise<string | n
   return rows[0]?.bot_id ?? null;
 }
 
-export async function cleanOldMeetings(): Promise<void> {
-  const db = getPool();
-  await db.query(`DELETE FROM meetings WHERE created_at < NOW() - INTERVAL '90 days'`);
-}
-
 function mapMeetingRow(row: any): Meeting {
   return {
     id: row.id,
@@ -1665,7 +1660,7 @@ git commit -m "feat(tray): add settings window with config form"
 import { app, ipcMain } from 'electron';
 import { createTray, setTrayState, updateTrayMenu } from './tray';
 import { openSettingsWindow, getSettingsWindow } from './settings-window';
-import { connect, runMigrations, cleanOldMeetings } from '../services/database';
+import { connect, runMigrations } from '../services/database';
 import { loadAppConfig, setConfig, getConfig, hasDecryptableSecrets } from '../services/config';
 import { startCalendarPolling, stopCalendarPolling, initiateOAuthFlow, disconnectCalendar } from '../services/calendar';
 import { startBotTracking, stopBotTracking, setOnTranscriptReady } from '../services/bot-tracker';
@@ -1689,8 +1684,6 @@ app.on('ready', async () => {
 
   setupIPC();
 
-  // Periodic cleanup
-  setInterval(() => cleanOldMeetings().catch(console.error), 24 * 60 * 60 * 1000);
 });
 
 async function startApp(dbUrl: string): Promise<void> {
