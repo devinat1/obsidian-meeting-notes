@@ -3,6 +3,7 @@ module github.com/devinat1/obsidian-meeting-notes/services/bot-service
 go 1.25.0
 
 require (
+	github.com/go-chi/chi/v5 v5.2.5
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/jackc/pgx/v5 v5.9.1
 	github.com/segmentio/kafka-go v0.4.50
