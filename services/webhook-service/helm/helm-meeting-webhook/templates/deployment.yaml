@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: meeting-webhook
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: meeting-webhook
+  template:
+    metadata:
+      labels:
+        app: meeting-webhook
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: meeting-webhook
+          image: {{ .Values.webhook.image.repository }}:{{ .Values.webhook.image.tag }}
+          ports:
+            - containerPort: {{ .Values.webhook.port }}
+              name: http
+          env:
+            - name: PORT
+              value: {{ .Values.webhook.port | quote }}
+            - name: KAFKA_BROKERS
+              valueFrom:
+                secretKeyRef:
+                  name: meeting-webhook-secret
+                  key: KAFKA_BROKERS
+            - name: RECALL_WORKSPACE_VERIFICATION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: meeting-webhook-secret
+                  key: RECALL_WORKSPACE_VERIFICATION_SECRET
+          resources:
+            {{- toYaml .Values.webhook.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.webhook.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.webhook.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 30
