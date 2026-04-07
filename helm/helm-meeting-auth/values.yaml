@@ -1,0 +1,16 @@
+namespace: liteagent
+
+auth:
+  image:
+    repository: ghcr.io/devinat1/meeting-auth
+    tag: "latest"
+  port: 8081
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "128Mi"
+      cpu: "250m"
+
+nodeSelector: {}

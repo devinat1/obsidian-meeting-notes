@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: meeting-auth
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: meeting-auth
+  template:
+    metadata:
+      labels:
+        app: meeting-auth
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: auth
+          image: {{ .Values.auth.image.repository }}:{{ .Values.auth.image.tag }}
+          ports:
+            - containerPort: {{ .Values.auth.port }}
+              name: http
+          envFrom:
+            - secretRef:
+                name: meeting-auth-secret
+          resources:
+            {{- toYaml .Values.auth.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /internal/auth/validate
+              port: {{ .Values.auth.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /internal/auth/validate
+              port: {{ .Values.auth.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
