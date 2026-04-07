@@ -1,0 +1,18 @@
+appId: net.liteagent.meeting-notes
+productName: Obsidian Meeting Notes
+mac:
+  category: public.app-category.productivity
+  target: dmg
+  icon: assets/icon.icns
+linux:
+  target: AppImage
+  category: Utility
+win:
+  target: nsis
+files:
+  - dist/**/*
+  - assets/**/*
+  - "!src/**/*"
+  - "!**/*.ts"
+extraResources:
+  - assets/*
