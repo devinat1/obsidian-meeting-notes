@@ -1,10 +1,10 @@
 helm/helm-meeting-calendar/values-prod.yaml
 
 # Compiled Go binaries
-services/calendar-service/calendar
+services/*/calendar
+services/*/bot
+services/*/transcript
+services/*/webhook
 services/cmd
 services/auth/cmd/auth
 services/gateway/cmd/gateway
-services/webhook-service/cmd/webhook
-services/bot-service/cmd/bot
-services/transcript-service/cmd/transcript
