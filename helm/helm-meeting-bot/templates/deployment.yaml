@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: meeting-bot
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: meeting-bot
+  template:
+    metadata:
+      labels:
+        app: meeting-bot
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: meeting-bot
+          image: {{ .Values.bot.image.repository }}:{{ .Values.bot.image.tag }}
+          ports:
+            - containerPort: {{ .Values.bot.port }}
+              name: http
+          env:
+            - name: PORT
+              value: {{ .Values.bot.port | quote }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: meeting-bot-secret
+                  key: DATABASE_URL
+            - name: KAFKA_BROKERS
+              valueFrom:
+                secretKeyRef:
+                  name: meeting-bot-secret
+                  key: KAFKA_BROKERS
+            - name: RECALL_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: meeting-bot-secret
+                  key: RECALL_REGION
+            - name: RECALL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: meeting-bot-secret
+                  key: RECALL_API_KEY
+          resources:
+            {{- toYaml .Values.bot.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.bot.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.bot.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 30
+      volumes: []

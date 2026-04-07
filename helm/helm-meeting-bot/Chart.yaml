@@ -1,0 +1,6 @@
+apiVersion: v2
+name: meeting-bot
+description: Bot Service - Recall AI bot lifecycle management
+type: application
+version: 0.1.0
+appVersion: "latest"
