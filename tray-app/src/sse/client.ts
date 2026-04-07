@@ -10,6 +10,7 @@ import type {
 
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
+const MAX_RECONNECT_ATTEMPTS = 50;
 const SSE_OPEN_STATE = 1;
 const SSE_EVENT_TYPES: readonly SSEEventType[] = [
   "meeting.upcoming",
@@ -27,6 +28,7 @@ interface SSEClientOptions {
   readonly apiKey: string;
   readonly onEvent: SSEEventHandler;
   readonly onConnectionChange: SSEConnectionHandler;
+  readonly onMaxRetriesExhausted?: () => void;
 }
 
 export class SSEClient {
@@ -40,12 +42,14 @@ export class SSEClient {
   private readonly apiKey: string;
   private readonly onEvent: SSEEventHandler;
   private readonly onConnectionChange: SSEConnectionHandler;
+  private readonly onMaxRetriesExhausted?: () => void;
 
   constructor(options: SSEClientOptions) {
     this.gatewayUrl = options.gatewayUrl;
     this.apiKey = options.apiKey;
     this.onEvent = options.onEvent;
     this.onConnectionChange = options.onConnectionChange;
+    this.onMaxRetriesExhausted = options.onMaxRetriesExhausted;
   }
 
   connect(): void {
@@ -150,6 +154,11 @@ export class SSEClient {
     const delayMs = backoffMs + jitterMs;
 
     this.reconnectAttempts += 1;
+
+    if (this.reconnectAttempts > MAX_RECONNECT_ATTEMPTS && this.onMaxRetriesExhausted) {
+      this.onMaxRetriesExhausted();
+      return;
+    }
 
     this.reconnectTimer = setTimeout(() => {
       this.connect();

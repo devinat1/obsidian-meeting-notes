@@ -292,3 +292,15 @@ app.on("before-quit", () => {
   }
   stopPendingNotesRetry();
 });
+
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught exception in main process.", error);
+  notifyError("Unexpected error occurred. Check logs for details.");
+  currentTrayState = "error";
+  currentStatusMessage = "Unexpected error";
+  updateTray();
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled promise rejection.", reason);
+});
