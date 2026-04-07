@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'" />
+    <title>Settings</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        padding: 24px;
+        background: #1e1e1e;
+        color: #e0e0e0;
+        font-size: 13px;
+      }
+      .section { margin-bottom: 20px; }
+      .section-title {
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #888;
+        margin-bottom: 8px;
+      }
+      label { display: block; margin-bottom: 4px; font-size: 13px; }
+      input, select {
+        width: 100%;
+        padding: 6px 8px;
+        border: 1px solid #444;
+        border-radius: 4px;
+        background: #2a2a2a;
+        color: #e0e0e0;
+        font-size: 13px;
+        margin-bottom: 10px;
+      }
+      input:focus, select:focus { outline: none; border-color: #6b8afd; }
+      button {
+        padding: 6px 14px;
+        border: 1px solid #444;
+        border-radius: 4px;
+        background: #333;
+        color: #e0e0e0;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      button:hover { background: #444; }
+      button.primary { background: #4a6cf7; border-color: #4a6cf7; }
+      button.primary:hover { background: #5b7bf8; }
+      .row { display: flex; gap: 8px; align-items: center; }
+      .status { font-size: 12px; color: #888; margin-left: 8px; }
+      .status.ok { color: #4caf50; }
+      .status.fail { color: #f44336; }
+      .hidden { display: none; }
+    </style>
+  </head>
+  <body>
+    <div class="section">
+      <div class="section-title">Backend</div>
+      <label for="api-key">API Key</label>
+      <div class="row">
+        <input type="password" id="api-key" placeholder="Enter backend API key" />
+        <button id="verify-key-btn">Verify</button>
+      </div>
+      <span id="key-status" class="status"></span>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Google Calendar</div>
+      <div class="row">
+        <button id="connect-calendar-btn" class="primary">Connect Google Calendar</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">LLM Configuration</div>
+      <label for="llm-provider">Provider</label>
+      <select id="llm-provider">
+        <option value="anthropic">Anthropic (Claude)</option>
+        <option value="openai">OpenAI (GPT-4)</option>
+        <option value="openai-compatible">OpenAI-compatible</option>
+      </select>
+      <label for="llm-api-key">API Key</label>
+      <input type="password" id="llm-api-key" placeholder="Enter LLM API key" />
+      <div id="base-url-group" class="hidden">
+        <label for="llm-base-url">Base URL</label>
+        <input type="text" id="llm-base-url" placeholder="https://api.example.com/v1" />
+      </div>
+      <label for="llm-model">Model (optional override)</label>
+      <input type="text" id="llm-model" placeholder="Leave blank for default" />
+    </div>
+
+    <div class="section">
+      <div class="section-title">Obsidian</div>
+      <label for="obsidian-vault">Vault name (leave blank for auto-detect)</label>
+      <div class="row">
+        <input type="text" id="obsidian-vault" placeholder="My Vault" />
+        <button id="verify-cli-btn">Verify CLI</button>
+      </div>
+      <span id="cli-status" class="status"></span>
+    </div>
+
+    <div class="section" style="text-align: right;">
+      <button id="save-btn" class="primary">Save</button>
+    </div>
+
+    <script>
+      const { settingsAPI } = window;
+
+      // Load existing config
+      settingsAPI.getConfig().then((config) => {
+        if (config.backend_api_key) {
+          document.getElementById("api-key").value = config.backend_api_key;
+        }
+        document.getElementById("llm-provider").value = config.llm_provider || "anthropic";
+        if (config.llm_api_key) {
+          document.getElementById("llm-api-key").value = config.llm_api_key;
+        }
+        if (config.llm_base_url) {
+          document.getElementById("llm-base-url").value = config.llm_base_url;
+        }
+        if (config.llm_model) {
+          document.getElementById("llm-model").value = config.llm_model;
+        }
+        if (config.obsidian_vault) {
+          document.getElementById("obsidian-vault").value = config.obsidian_vault;
+        }
+        toggleBaseUrl();
+      });
+
+      // Toggle base URL visibility
+      function toggleBaseUrl() {
+        const provider = document.getElementById("llm-provider").value;
+        const group = document.getElementById("base-url-group");
+        group.className = provider === "openai-compatible" ? "" : "hidden";
+      }
+      document.getElementById("llm-provider").addEventListener("change", toggleBaseUrl);
+
+      // Verify backend key
+      document.getElementById("verify-key-btn").addEventListener("click", async () => {
+        const key = document.getElementById("api-key").value;
+        const status = document.getElementById("key-status");
+        status.textContent = "Verifying...";
+        status.className = "status";
+        const result = await settingsAPI.verifyBackendKey(key);
+        status.textContent = result.valid ? "Valid" : (result.error || "Invalid");
+        status.className = result.valid ? "status ok" : "status fail";
+      });
+
+      // Verify Obsidian CLI
+      document.getElementById("verify-cli-btn").addEventListener("click", async () => {
+        const status = document.getElementById("cli-status");
+        status.textContent = "Checking...";
+        status.className = "status";
+        const result = await settingsAPI.verifyObsidianCLI();
+        status.textContent = result.available ? "CLI available" : "CLI not found";
+        status.className = result.available ? "status ok" : "status fail";
+      });
+
+      // Connect calendar
+      document.getElementById("connect-calendar-btn").addEventListener("click", () => {
+        settingsAPI.connectCalendar();
+      });
+
+      // Save
+      document.getElementById("save-btn").addEventListener("click", async () => {
+        const apiKey = document.getElementById("api-key").value;
+        if (apiKey && !apiKey.includes("...")) {
+          await settingsAPI.setBackendApiKey(apiKey);
+        }
+
+        const llmApiKey = document.getElementById("llm-api-key").value;
+        if (llmApiKey && !llmApiKey.includes("...")) {
+          await settingsAPI.setLLMConfig({
+            provider: document.getElementById("llm-provider").value,
+            apiKey: llmApiKey,
+            baseUrl: document.getElementById("llm-base-url").value || null,
+            model: document.getElementById("llm-model").value || null,
+          });
+        }
+
+        const vault = document.getElementById("obsidian-vault").value || null;
+        await settingsAPI.setObsidianVault(vault);
+
+        window.close();
+      });
+    </script>
+  </body>
+</html>
