@@ -1,0 +1,27 @@
+# helm-meeting-calendar/values.yaml
+namespace: liteagent
+
+calendarService:
+  image:
+    repository: meeting-calendar-service
+    tag: "latest"
+  port: 8081
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "500m"
+
+env:
+  DATABASE_URL: ""
+  KAFKA_BROKER: "kafka.liteagent.svc.cluster.local:9092"
+  GOOGLE_CLIENT_ID: ""
+  GOOGLE_CLIENT_SECRET: ""
+  GOOGLE_REDIRECT_URI: "https://api.liteagent.net/api/auth/calendar/callback"
+  ENCRYPTION_KEY: ""
+  DEFAULT_POLL_INTERVAL: "3"
+  DEFAULT_BOT_JOIN_BEFORE: "1"
+
+nodeSelector: {}

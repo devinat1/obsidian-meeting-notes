@@ -1,0 +1,7 @@
+# helm-meeting-calendar/Chart.yaml
+apiVersion: v2
+name: meeting-calendar
+description: Calendar Service - Google Calendar polling and meeting event producer
+type: application
+version: 0.1.0
+appVersion: "latest"
