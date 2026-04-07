@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pg-cal
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: pg-cal
+  template:
+    metadata:
+      labels:
+        app: pg-cal
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}
+          ports:
+            - containerPort: {{ .Values.postgres.port }}
+              name: postgres
+          envFrom:
+            - secretRef:
+                name: pg-cal-secret
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+          volumeMounts:
+            - name: pg-data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            tcpSocket:
+              port: {{ .Values.postgres.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 5
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.postgres.port }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      volumes:
+        {{- if .Values.postgres.persistence.enabled }}
+        - name: pg-data
+          persistentVolumeClaim:
+            claimName: pg-cal-data
+        {{- else }}
+        - name: pg-data
+          emptyDir: {}
+        {{- end }}

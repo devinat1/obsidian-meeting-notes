@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'" />
+    <title>Setup</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        padding: 32px;
+        background: #1e1e1e;
+        color: #e0e0e0;
+        font-size: 14px;
+      }
+      .title {
+        font-size: 20px;
+        font-weight: 600;
+        margin-bottom: 8px;
+      }
+      .subtitle {
+        font-size: 13px;
+        color: #888;
+        margin-bottom: 24px;
+      }
+      .step { display: none; }
+      .step.active { display: block; }
+      .step-title {
+        font-size: 16px;
+        font-weight: 600;
+        margin-bottom: 4px;
+      }
+      .step-desc {
+        font-size: 13px;
+        color: #999;
+        margin-bottom: 16px;
+      }
+      label { display: block; margin-bottom: 4px; font-size: 13px; }
+      input, select {
+        width: 100%;
+        padding: 8px 10px;
+        border: 1px solid #444;
+        border-radius: 4px;
+        background: #2a2a2a;
+        color: #e0e0e0;
+        font-size: 13px;
+        margin-bottom: 12px;
+      }
+      input:focus, select:focus { outline: none; border-color: #6b8afd; }
+      button {
+        padding: 8px 18px;
+        border: 1px solid #444;
+        border-radius: 4px;
+        background: #333;
+        color: #e0e0e0;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      button:hover { background: #444; }
+      button.primary { background: #4a6cf7; border-color: #4a6cf7; }
+      button.primary:hover { background: #5b7bf8; }
+      .nav { display: flex; justify-content: space-between; margin-top: 24px; }
+      .status { font-size: 12px; margin-top: 4px; margin-bottom: 8px; }
+      .status.ok { color: #4caf50; }
+      .status.fail { color: #f44336; }
+      .steps-indicator {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 24px;
+      }
+      .step-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #444;
+      }
+      .step-dot.active { background: #4a6cf7; }
+      .step-dot.done { background: #4caf50; }
+      .hidden { display: none; }
+    </style>
+  </head>
+  <body>
+    <div class="title">Obsidian Meeting Notes</div>
+    <div class="subtitle">Let's get you set up in a few quick steps.</div>
+
+    <div class="steps-indicator">
+      <div class="step-dot active" id="dot-0"></div>
+      <div class="step-dot" id="dot-1"></div>
+      <div class="step-dot" id="dot-2"></div>
+      <div class="step-dot" id="dot-3"></div>
+    </div>
+
+    <!-- Step 1: Backend API Key -->
+    <div class="step active" id="step-0">
+      <div class="step-title">1. Backend API Key</div>
+      <div class="step-desc">Enter the API key from your registration email.</div>
+      <label for="setup-api-key">API Key</label>
+      <input type="password" id="setup-api-key" placeholder="Enter your API key" />
+      <button id="setup-verify-key">Verify</button>
+      <div id="setup-key-status" class="status"></div>
+    </div>
+
+    <!-- Step 2: Google Calendar -->
+    <div class="step" id="step-1">
+      <div class="step-title">2. Google Calendar</div>
+      <div class="step-desc">Connect your Google Calendar so the bot knows when to join meetings.</div>
+      <button id="setup-connect-cal" class="primary">Connect Google Calendar</button>
+      <div class="step-desc" style="margin-top: 12px;">A browser window will open. Come back here after connecting.</div>
+    </div>
+
+    <!-- Step 3: LLM Config -->
+    <div class="step" id="step-2">
+      <div class="step-title">3. LLM Provider</div>
+      <div class="step-desc">Choose an LLM provider and enter your API key for summarization.</div>
+      <label for="setup-llm-provider">Provider</label>
+      <select id="setup-llm-provider">
+        <option value="anthropic">Anthropic (Claude) - Recommended</option>
+        <option value="openai">OpenAI (GPT-4)</option>
+        <option value="openai-compatible">OpenAI-compatible</option>
+      </select>
+      <label for="setup-llm-key">API Key</label>
+      <input type="password" id="setup-llm-key" placeholder="Enter LLM API key" />
+      <div id="setup-base-url-group" class="hidden">
+        <label for="setup-llm-base-url">Base URL</label>
+        <input type="text" id="setup-llm-base-url" placeholder="https://api.example.com/v1" />
+      </div>
+    </div>
+
+    <!-- Step 4: Obsidian -->
+    <div class="step" id="step-3">
+      <div class="step-title">4. Obsidian</div>
+      <div class="step-desc">Verify the Obsidian CLI is available and optionally set a vault.</div>
+      <button id="setup-verify-cli">Verify Obsidian CLI</button>
+      <div id="setup-cli-status" class="status"></div>
+      <label for="setup-vault" style="margin-top: 12px;">Vault name (optional)</label>
+      <input type="text" id="setup-vault" placeholder="Leave blank for auto-detect" />
+    </div>
+
+    <div class="nav">
+      <button id="prev-btn" class="hidden">Back</button>
+      <button id="next-btn" class="primary">Next</button>
+    </div>
+
+    <script>
+      const { settingsAPI } = window;
+      let currentStep = 0;
+      const totalSteps = 4;
+
+      function showStep(step) {
+        for (let i = 0; i < totalSteps; i++) {
+          document.getElementById(`step-${i}`).className = i === step ? "step active" : "step";
+          const dot = document.getElementById(`dot-${i}`);
+          dot.className = i < step ? "step-dot done" : (i === step ? "step-dot active" : "step-dot");
+        }
+        document.getElementById("prev-btn").className = step > 0 ? "" : "hidden";
+        document.getElementById("next-btn").textContent = step === totalSteps - 1 ? "Done" : "Next";
+        currentStep = step;
+      }
+
+      document.getElementById("next-btn").addEventListener("click", async () => {
+        if (currentStep === 0) {
+          // Save backend API key
+          const key = document.getElementById("setup-api-key").value;
+          if (key) {
+            await settingsAPI.setBackendApiKey(key);
+          }
+        } else if (currentStep === 2) {
+          // Save LLM config
+          const apiKey = document.getElementById("setup-llm-key").value;
+          if (apiKey) {
+            await settingsAPI.setLLMConfig({
+              provider: document.getElementById("setup-llm-provider").value,
+              apiKey,
+              baseUrl: document.getElementById("setup-llm-base-url").value || null,
+              model: null,
+            });
+          }
+        } else if (currentStep === 3) {
+          // Save vault and finish
+          const vault = document.getElementById("setup-vault").value || null;
+          await settingsAPI.setObsidianVault(vault);
+          window.close();
+          return;
+        }
+
+        if (currentStep < totalSteps - 1) {
+          showStep(currentStep + 1);
+        }
+      });
+
+      document.getElementById("prev-btn").addEventListener("click", () => {
+        if (currentStep > 0) {
+          showStep(currentStep - 1);
+        }
+      });
+
+      // Step 1: Verify key
+      document.getElementById("setup-verify-key").addEventListener("click", async () => {
+        const key = document.getElementById("setup-api-key").value;
+        const status = document.getElementById("setup-key-status");
+        status.textContent = "Verifying...";
+        status.className = "status";
+        const result = await settingsAPI.verifyBackendKey(key);
+        status.textContent = result.valid ? "Valid key" : (result.error || "Invalid key");
+        status.className = result.valid ? "status ok" : "status fail";
+      });
+
+      // Step 2: Connect calendar
+      document.getElementById("setup-connect-cal").addEventListener("click", () => {
+        settingsAPI.connectCalendar();
+      });
+
+      // Step 3: Toggle base URL
+      document.getElementById("setup-llm-provider").addEventListener("change", () => {
+        const provider = document.getElementById("setup-llm-provider").value;
+        document.getElementById("setup-base-url-group").className =
+          provider === "openai-compatible" ? "" : "hidden";
+      });
+
+      // Step 4: Verify CLI
+      document.getElementById("setup-verify-cli").addEventListener("click", async () => {
+        const status = document.getElementById("setup-cli-status");
+        status.textContent = "Checking...";
+        status.className = "status";
+        const result = await settingsAPI.verifyObsidianCLI();
+        status.textContent = result.available ? "Obsidian CLI available" : "Obsidian CLI not found";
+        status.className = result.available ? "status ok" : "status fail";
+      });
+    </script>
+  </body>
+</html>

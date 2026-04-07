@@ -1,0 +1,30 @@
+<!-- services/auth/static/verify.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Email Verified - Obsidian Meeting Notes</title>
+    <style>
+        body { font-family: -apple-system, system-ui, sans-serif; max-width: 480px; margin: 80px auto; padding: 0 20px; text-align: center; }
+        .key-box { background: #f5f5f5; border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin: 24px 0; word-break: break-all; font-family: monospace; font-size: 14px; }
+        .copy-btn { background: #333; color: #fff; border: none; padding: 10px 24px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+        .copy-btn:hover { background: #555; }
+        .warning { color: #c00; font-size: 13px; margin-top: 16px; }
+    </style>
+</head>
+<body>
+    <div>Email Verified</div>
+    <div>Your API key is below. Copy it and paste it into the tray app settings.</div>
+    <div class="key-box" id="key"></div>
+    <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('key').textContent)">Copy to Clipboard</button>
+    <div class="warning">This key will not be shown again. Store it securely.</div>
+    <script>
+        const hash = window.location.hash;
+        if (hash.startsWith('#key=')) {
+            document.getElementById('key').textContent = hash.substring(5);
+            history.replaceState(null, '', window.location.pathname);
+        } else {
+            document.getElementById('key').textContent = 'No key found. The link may have already been used.';
+        }
+    </script>
+</body>
+</html>

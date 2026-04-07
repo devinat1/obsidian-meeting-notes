@@ -1,0 +1,14 @@
+# helm-meeting-calendar/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: meeting-calendar
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: meeting-calendar
+  ports:
+    - port: {{ .Values.calendarService.port }}
+      targetPort: {{ .Values.calendarService.port }}
+      protocol: TCP
+      name: http

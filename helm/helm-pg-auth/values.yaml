@@ -1,0 +1,22 @@
+namespace: liteagent
+
+postgres:
+  image:
+    repository: postgres
+    tag: "16"
+  port: 5432
+  database: auth
+  user: auth
+  persistence:
+    enabled: true
+    size: 2Gi
+    storageClass: local-path
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "500m"
+
+nodeSelector: {}

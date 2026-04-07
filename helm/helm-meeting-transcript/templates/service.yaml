@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: meeting-transcript
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: meeting-transcript
+  ports:
+    - port: {{ .Values.transcript.port }}
+      targetPort: {{ .Values.transcript.port }}
+      protocol: TCP
+      name: http

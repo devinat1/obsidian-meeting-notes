@@ -1,0 +1,23 @@
+namespace: liteagent
+
+transcript:
+  image:
+    repository: ghcr.io/devinat1/meeting-transcript-service
+    tag: "latest"
+  port: 8082
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "256Mi"
+      cpu: "500m"
+
+env:
+  DATABASE_URL: "postgres://transcript_service:CHANGEME@meeting-transcript-db.liteagent.svc.cluster.local:5432/transcript_service?sslmode=disable"
+  KAFKA_BROKERS: "kafka.liteagent.svc.cluster.local:9092"
+  RECALL_REGION: "us-west-2"
+  RECALL_API_KEY: "CHANGEME"
+  BOT_SERVICE_INTERNAL_URL: "http://meeting-bot.liteagent.svc.cluster.local:8081"
+
+nodeSelector: {}

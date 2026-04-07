@@ -1,0 +1,75 @@
+# helm-meeting-calendar/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: meeting-calendar
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: meeting-calendar
+  template:
+    metadata:
+      labels:
+        app: meeting-calendar
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: calendar-service
+          image: {{ .Values.calendarService.image.repository }}:{{ .Values.calendarService.image.tag }}
+          ports:
+            - containerPort: {{ .Values.calendarService.port }}
+              name: http
+          env:
+            - name: PORT
+              value: {{ .Values.calendarService.port | quote }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: meeting-calendar-secret
+                  key: DATABASE_URL
+            - name: KAFKA_BROKER
+              value: {{ .Values.env.KAFKA_BROKER | quote }}
+            - name: GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: meeting-calendar-secret
+                  key: GOOGLE_CLIENT_ID
+            - name: GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: meeting-calendar-secret
+                  key: GOOGLE_CLIENT_SECRET
+            - name: GOOGLE_REDIRECT_URI
+              value: {{ .Values.env.GOOGLE_REDIRECT_URI | quote }}
+            - name: ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: meeting-calendar-secret
+                  key: ENCRYPTION_KEY
+            - name: DEFAULT_POLL_INTERVAL
+              value: {{ .Values.env.DEFAULT_POLL_INTERVAL | quote }}
+            - name: DEFAULT_BOT_JOIN_BEFORE
+              value: {{ .Values.env.DEFAULT_BOT_JOIN_BEFORE | quote }}
+          resources:
+            {{- toYaml .Values.calendarService.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.calendarService.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.calendarService.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 5

@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: meeting-bot-db
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: meeting-bot-db
+  template:
+    metadata:
+      labels:
+        app: meeting-bot-db
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}
+          ports:
+            - containerPort: {{ .Values.postgres.port }}
+              name: postgres
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: meeting-bot-db-secret
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: meeting-bot-db-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: meeting-bot-db-secret
+                  key: POSTGRES_PASSWORD
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            tcpSocket:
+              port: {{ .Values.postgres.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.postgres.port }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        {{- if .Values.postgres.persistence.enabled }}
+        - name: pgdata
+          persistentVolumeClaim:
+            claimName: meeting-bot-db-data
+        {{- else }}
+        - name: pgdata
+          emptyDir: {}
+        {{- end }}

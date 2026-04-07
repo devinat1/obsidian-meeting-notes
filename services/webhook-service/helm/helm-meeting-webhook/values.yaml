@@ -1,0 +1,20 @@
+namespace: liteagent
+
+webhook:
+  image:
+    repository: ghcr.io/devinat1/meeting-webhook-service
+    tag: "latest"
+  port: 8080
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "128Mi"
+      cpu: "200m"
+
+env:
+  KAFKA_BROKERS: "kafka.liteagent.svc.cluster.local:9092"
+  RECALL_WORKSPACE_VERIFICATION_SECRET: "CHANGEME"
+
+nodeSelector: {}
