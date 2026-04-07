@@ -1,0 +1,14 @@
+# helm/helm-meeting-gateway/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: meeting-gateway
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: meeting-gateway
+  ports:
+    - port: {{ .Values.gateway.port }}
+      targetPort: {{ .Values.gateway.port }}
+      protocol: TCP
+      name: http

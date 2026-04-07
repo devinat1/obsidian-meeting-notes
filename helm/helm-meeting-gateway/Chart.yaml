@@ -1,0 +1,7 @@
+# helm/helm-meeting-gateway/Chart.yaml
+apiVersion: v2
+name: meeting-gateway
+description: Gateway Service for Obsidian Meeting Notes
+type: application
+version: 0.1.0
+appVersion: "latest"

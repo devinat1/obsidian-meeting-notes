@@ -1,0 +1,23 @@
+# helm/helm-meeting-gateway/values.yaml
+namespace: liteagent
+
+gateway:
+  image:
+    repository: ghcr.io/devinat1/meeting-gateway
+    tag: "latest"
+  port: 8080
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "128Mi"
+      cpu: "250m"
+
+ingress:
+  enabled: true
+  host: api.liteagent.net
+  tlsSecretName: api-liteagent-tls
+  clusterIssuer: letsencrypt-prod
+
+nodeSelector: {}
